@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: delete-s3
+spec:
+  template:
+    spec:
+      containers:
+      - name: delete-s3
+        image: $DOCKER_TEST_IMAGE
+        command: [bash]
+        args:
+        - -c
+        - ./test/scripts/delete-s3.sh
+        env:
+        - name: LOCAL_AWS_ENDPOINT
+          value: $LOCAL_AWS_ENDPOINT
+        - name: BUCKET
+          value: $BUCKET
+        - name: OBJECT_KEY
+          value: $OBJECT_KEY
+        - name: ENVIRONMENT
+          value: $ENVIRONMENT
+        envFrom:
+          - configMapRef:
+              name: $TEST_AWS_CREDENTIALS_NAME
+      restartPolicy: Never

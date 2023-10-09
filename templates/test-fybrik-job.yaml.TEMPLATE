@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $TEST_APP_NAME
+  labels:
+    app: $TEST_APP_NAME
+spec:
+  template:
+    metadata:
+      labels:
+        app: $TEST_APP_NAME
+    spec:
+      containers:
+      - name: $TEST_APP_NAME
+        image: $DOCKER_TEST_IMAGE
+        command: [sh]
+        args:
+        - -c
+        - ./test/scripts/test-fybrik.sh
+        env:
+        - name: ENDPOINT_URL
+          value: $ENDPOINT_URL
+        - name: CATALOGED_ASSET
+          value: $CATALOGED_ASSET
+      restartPolicy: Never

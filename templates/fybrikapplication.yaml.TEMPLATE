@@ -1,0 +1,18 @@
+apiVersion: app.fybrik.io/v1beta1
+kind: FybrikApplication
+metadata:
+  name: $TEST_APP_NAME
+  labels:
+    app: $TEST_APP_NAME
+spec:
+  selector:
+    workloadSelector:
+      matchLabels:
+        app: $TEST_APP_NAME
+  appInfo:
+    intent: Fraud Detection
+  data:
+    - dataSetID: $CATALOGED_ASSET
+      requirements:
+        interface: 
+          protocol: fybrik-arrow-flight

@@ -1,0 +1,44 @@
+{
+  "destinationCatalogID": "openmetadata",
+  "destinationAssetID": "$TEST_APP_NAME",
+  "credentials": "/v1/kubernetes-secrets/$TEST_APP_NAME?namespace=$FYBRIK_WORKLOAD_NS",
+  "details": {
+    "dataFormat": "csv",
+    "connection": {
+      "name": "s3",
+      "s3": {
+        "endpoint": "$S3_ENDPOINT",
+        "bucket": "$BUCKET",
+        "object_key": "$OBJECT_KEY",
+        "region":  "$AWS_REGION"
+      }
+    }
+  },
+  "resourceMetadata": {
+    "name": "Synthetic Financial Datasets For Fraud Detection",
+    "geography": "$AWS_REGION",
+    "tags": {
+      "Purpose.finance": "true"
+    },
+    "columns": [
+      {
+        "name": "nameOrig",
+        "tags": {
+          "PII.Sensitive": "true"
+        }
+      },
+      {
+        "name": "oldbalanceOrg",
+        "tags": {
+          "PII.Sensitive": "true"
+        }
+      },
+      {
+        "name": "newbalanceOrig",
+        "tags": {
+          "PII.Sensitive": "true"
+        }
+      }
+    ]
+  }
+}

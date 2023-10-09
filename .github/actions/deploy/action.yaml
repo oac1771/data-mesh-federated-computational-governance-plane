@@ -1,0 +1,50 @@
+name: 'Deploy'
+description: 'Deploy OpenMetadata to EKS'
+inputs:
+  github-token:
+    description: github token needed to authenticate to ghcr registry
+    required: true
+  aws-region:
+    description: aws-region
+    required: true
+  environment:
+    description: environment to deploy to 
+    required: true
+    options: 
+    - dev
+    - prod
+  aws-profile:
+    description: name of profile to associate aws credentials
+    default: 'cicd-k8s'
+runs:
+  using: "composite"
+  steps:
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: arn:aws:iam::182174426630:role/k8s-platform-admin-cicd-role
+        role-session-name: cicd-session
+        aws-region: ${{ inputs.aws-region }}
+        role-duration-seconds: 1200
+    - name: Log in to the Container registry
+      uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github-token }}
+    - name: install taskfile
+      shell: bash
+      run: |
+        sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+    - name: Update Kube Config
+      run: |
+        aws eks --region us-east-2 update-kubeconfig --name datamesh-accelerator-cluster
+      shell: bash
+    - name: Deploy Fybrik
+      run: |
+        aws sts get-caller-identity --no-cli-pager
+
+        export ENVIRONMENT=${{ inputs.environment }}
+        export GHCR_ACCESS_TOKEN=${{ inputs.github-token }}
+        task deploy-fybrik
+      shell: bash

@@ -1,0 +1,12 @@
+config_override: |
+  openmetadata_sleep_interval: 100
+  openmetadata_num_retries: 1000
+  openmetadata_user: $OPENMETADATA_USER
+  openmetadata_password: $OPENMETADATA_PASSWORD
+  openmetadata_endpoint: $OPENMETADATA_ENDPOINT
+
+  vault:
+    role: "fybrik"
+    jwt_file_path: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    authPath: kubernetes
+    address: "http://vault.$FYBRIK_NS:8200"

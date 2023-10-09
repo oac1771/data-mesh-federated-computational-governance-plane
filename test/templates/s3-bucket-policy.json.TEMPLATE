@@ -1,0 +1,19 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ListObjectsInBucket",
+            "Effect": "Allow",
+            "Principal": { "AWS": "arn:aws:sts::182174426630:assumed-role/k8s-platform-admin-cicd-role/cicd-session" },
+            "Action": ["s3:ListBucket"],
+            "Resource": ["arn:aws:s3:::$BUCKET"]
+        },
+        {
+            "Sid": "AllObjectActions",
+            "Effect": "Allow",
+            "Principal": { "AWS": "arn:aws:sts::182174426630:assumed-role/k8s-platform-admin-cicd-role/cicd-session" },
+            "Action": "s3:*Object",
+            "Resource": ["arn:aws:s3:::$BUCKET/*"]
+        }
+    ]
+}

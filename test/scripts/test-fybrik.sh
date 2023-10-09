@@ -1,0 +1,1 @@
+pytest -vvv test/scripts/test_fybrik.py

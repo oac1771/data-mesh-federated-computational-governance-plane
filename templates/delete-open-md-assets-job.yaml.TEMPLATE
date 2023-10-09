@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: delete-open-md-asset
+spec:
+  template:
+    spec:
+      containers:
+      - name: delete-s3
+        image: $DOCKER_TEST_IMAGE
+        command: [bash]
+        args:
+        - -c
+        - ./test/scripts/delete-open-md-asset.sh
+        env:
+        - name: CATALOGED_ASSET
+          value: $CATALOGED_ASSET
+        - name: OPENMETADATA_ENDPOINT
+          value: $OPENMETADATA_ENDPOINT
+      restartPolicy: Never

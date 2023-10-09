@@ -1,0 +1,24 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - '**'
+
+env:
+  AWS_REGION : us-east-2
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Dev Deploy
+        uses: ./.github/actions/deploy
+        with:
+          environment: dev
+          aws-region: ${{ env.AWS_REGION }}
+          github-token: ${{ secrets.GHCR_PERSONAL_ACCESS_TOKEN }}

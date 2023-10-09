@@ -1,0 +1,38 @@
+name: 'Build and Push'
+description: 'Build and push docker image got ghcr registry'
+inputs:
+  path-to-image:
+    description: relative path to docker image to build
+    required: true
+  repository:
+    description: name of docker repository
+    required: true
+  github-token:
+    description: github token needed to authenticate to ghcr registry
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Create Semver Variables
+      shell: bash
+      run: |
+        export GIT_TAG=$(echo $GITHUB_REF | cut -d "/" -f 3)
+        echo "MAJOR_VERSION=$(echo $GIT_TAG | cut -d "." -f 1)" >> $GITHUB_ENV
+        echo "GIT_TAG=$GIT_TAG" >> $GITHUB_ENV
+    - name: Log in to the Container registry
+      uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github-token }}
+    - name: build image
+      shell: bash
+      run: |
+        docker build -f ${{ inputs.path-to-image }} . \
+          -t ${{ inputs.repository }}:$GIT_TAG \
+          -t ${{ inputs.repository }}:$MAJOR_VERSION \
+          -t ${{ inputs.repository }}:latest
+    - name: push image
+      shell: bash
+      run: |
+        docker push ${{ inputs.repository }} --all-tags

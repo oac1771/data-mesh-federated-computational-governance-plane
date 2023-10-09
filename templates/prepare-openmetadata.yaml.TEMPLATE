@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prepare-openmetadata
+  namespace: $OPENMETADATA_NS
+spec:
+  template:
+    spec:
+      containers:
+      - name: prepare-openmetadata
+        image: 'ghcr.io/fybrik/openmetadata-connector:0.4.0'
+        command: ["/openmetadata-connector", "prepare", "--customization", "/customization.yaml"]
+        env:
+        - name: OPENMETADATA_ENDPOINT
+          value: $OPENMETADATA_ENDPOINT
+        - name: OPENMETADATA_USER
+          value: $OPENMETADATA_USER
+        - name: OPENMETADATA_PASSWORD
+          value: $OPENMETADATA_PASSWORD
+      restartPolicy: Never
+  backoffLimit: 4

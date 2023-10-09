@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: register-dataset
+spec:
+  template:
+    spec:
+      containers:
+      - name: register-dataset
+        image: $DOCKER_TEST_IMAGE
+        command: [sh]
+        args:
+        - -c
+        - |
+          ./test/scripts/register-dataset.sh  
+        env:
+        - name: TEST_APP_NAME
+          value: $TEST_APP_NAME
+        - name: FYBRIK_WORKLOAD_NS
+          value: $FYBRIK_WORKLOAD_NS
+        - name: S3_ENDPOINT
+          value: $S3_ENDPOINT
+        - name: BUCKET
+          value: $BUCKET
+        - name: OBJECT_KEY
+          value: $OBJECT_KEY
+        - name: FYBRIK_NS
+          value: $FYBRIK_NS
+        - name: AWS_REGION
+          value: $AWS_REGION
+      restartPolicy: Never

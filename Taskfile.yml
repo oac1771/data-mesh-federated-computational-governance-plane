@@ -1,0 +1,439 @@
+version: '3'
+
+env:
+  ENVIRONMENT: ""
+  GHCR_ACCESS_TOKEN: ""
+
+tasks:
+
+  destroy-local:
+    cmds:
+      - minikube stop
+      - minikube delete
+  
+  deploy-fybrik:
+    cmds:
+      - task: start-minikube
+      - task pull-docker-deployment-image
+      - task run-docker-container COMMAND="task install-fybrik"
+    env:
+      DOCKER_DEPLOYMENT_IMAGE: "ghcr.io/twlabs/deployment_environment:0"
+      DOCKER_TEST_IMAGE: 'ghcr.io/twlabs/test-fybrik:{{.TAG}}'
+    vars:
+      DOCKER_TEST_IMAGE_TAG: 0.0.30
+      TAG: 
+        sh: |
+          if task is-ci
+          then
+            echo '{{.DOCKER_TEST_IMAGE_TAG}}'
+          else
+            echo latest
+          fi
+
+  install-fybrik:
+    cmds:
+      - task: add-helm-charts 
+      - kubectl create ns $FYBRIK_NS || true
+      - kubectl create ns $FYBRIK_WORKLOAD_NS || true
+      - task deploy-fybrik-dependencies
+      - |
+        task render-template TEMPLATE_FILE=templates/fybrik-helm-values.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_FYBRIK_VALUES \
+          TEMPLATE_VARS='${OPENMETADATA_ENDPOINT},${OPENMETADATA_USER},${OPENMETADATA_PASSWORD},${FYBRIK_NS}'
+      - helm upgrade --install fybrik-crd fybrik-charts/fybrik-crd -n $FYBRIK_NS --version $FYBRIK_CHART_VERSION --wait
+      - |
+        helm upgrade --install fybrik fybrik-charts/fybrik --version $FYBRIK_CHART_VERSION \
+          --set coordinator.catalog=openmetadata \
+          --set openmetadataConnector.openmetadata_endpoint=$OPENMETADATA_ENDPOINT \
+          --set cluster.region=$AWS_REGION \
+          --set applicationNamespace=$FYBRIK_WORKLOAD_NS \
+          --set internalCRsNamespace=$FYBRIK_NS \
+          --set adminCRsNamespace=$FYBRIK_NS \
+          --values=$PATH_TO_FYBRIK_VALUES \
+          --wait -n $FYBRIK_NS
+      - sleep 1 # need to wait briefly before creating arrow-flight modules. kubectl wait for manager pod did not work
+      - kubectl apply -f https://github.com/fybrik/arrow-flight-module/releases/download/v0.11.0/module.yaml -n $FYBRIK_NS
+      - task test-fybrik
+    env:
+      AWS_REGION: us-east-2
+      FYBRIK_CHART_VERSION: 1.3.2
+      PATH_TO_FYBRIK_VALUES: fybrik-helm-values.yaml
+      FYBRIK_NS: '{{.FYBRIK_NS}}'
+      OPENMETADATA_USER: admin
+      OPENMETADATA_PASSWORD: admin
+      OPENMETADATA_ENDPOINT: 'http://openmetadata.{{.OPEN_METADATA_NS}}:8585/api'
+      OPENMETADATA_NS: '{{.OPEN_METADATA_NS}}'
+      FYBRIK_WORKLOAD_NS: '{{.FYBRIK_WORKLOAD_NS}}'
+    vars:
+      FYBRIK_NS: 
+        sh: |
+          echo fybrik-system-$ENVIRONMENT
+      OPEN_METADATA_NS: 
+        sh: |
+          echo open-metadata-$ENVIRONMENT
+      FYBRIK_WORKLOAD_NS: 
+        sh: |
+          echo fybrik-workloads-$ENVIRONMENT
+
+  add-helm-charts:
+    internal: true
+    cmds:
+      - helm repo add jetstack https://charts.jetstack.io
+      - helm repo add hashicorp https://helm.releases.hashicorp.com
+      - helm repo add fybrik-charts https://fybrik.github.io/charts
+      - helm repo add open-metadata https://helm.open-metadata.org/
+      - helm repo add localstack-repo https://helm.localstack.cloud
+      - helm repo update
+
+  deploy-fybrik-dependencies:
+    cmds:
+      - task install-cert-manager
+      - task deploy-localstack
+      - task install-vault
+      - task install-open-metadata
+      - task prepare-open-metadata-for-fybrik
+
+  install-cert-manager:
+    cmds:
+      - |
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --version v1.6.2 \
+          --create-namespace \
+          --set installCRDs=true \
+          --wait --timeout 120s
+
+  deploy-localstack:
+    cmds:
+      - echo Deploying Localstack...
+      - | 
+        helm upgrade --install localstack localstack-repo/localstack \
+          --set startServices="s3" \
+          --set service.type=ClusterIP \
+          --set livenessProbe.initialDelaySeconds=25 \
+          -n $FYBRIK_NS
+      - |
+        kubectl wait pod --for=condition=ready -l app.kubernetes.io/instance=localstack \
+          --timeout=120s -n $FYBRIK_NS
+    status:
+      - task is-ci
+
+  install-vault:
+    cmds:
+      - |
+        helm upgrade --install vault fybrik-charts/vault -n $FYBRIK_NS \
+          --set "vault.injector.enabled=false" \
+          --set "vault.server.dev.enabled=true" \
+          --set "vault.server.extraEnvironmentVars.OM_SERVER_URL=$OPENMETADATA_ENDPOINT" \
+          --values https://raw.githubusercontent.com/fybrik/fybrik/v1.3.2/charts/vault/env/dev/vault-single-cluster-values.yaml
+      - kubectl wait --for=condition=ready pod/vault-0 -n $FYBRIK_NS --timeout=120s
+
+  install-open-metadata:
+    cmds:
+      - kubectl create ns $OPENMETADATA_NS || true
+      - |
+        kubectl create secret generic mysql-secrets \
+          --from-literal=openmetadata-mysql-password=openmetadata_password -n $OPENMETADATA_NS || true
+      - |
+        kubectl create secret generic airflow-secrets \
+          --from-literal=openmetadata-airflow-password=admin -n $OPENMETADATA_NS || true
+      - |
+        kubectl create secret generic airflow-mysql-secrets \
+          --from-literal=airflow-mysql-password=airflow_pass -n $OPENMETADATA_NS || true
+      - |
+        helm upgrade --install openmetadata-dependencies open-metadata/openmetadata-dependencies \
+          --set airflow.externalDatabase.host=$MYSQL_ENDPOINT \
+          --set airflow.airflow.config.AIRFLOW__LINEAGE__OPENMETADATA_API_ENDPOINT="$OPENMETADATA_ENDPOINT" \
+          --version $OPENMETADATA_CHART_VERSION --wait --timeout 20m -n $OPENMETADATA_NS
+      - |
+        helm upgrade --install openmetadata open-metadata/openmetadata \
+          --set global.airflow.openmetadata.serverHostApiUrl=$OPENMETADATA_ENDPOINT \
+          --set global.airflow.host=$AIRFLOW_ENDPOINT \
+          --version $OPENMETADATA_CHART_VERSION --wait --timeout 20m -n $OPENMETADATA_NS
+    env:
+      OPENMETADATA_CHART_VERSION: 0.0.39
+      MYSQL_ENDPOINT: '{{.MYSQL_ENDPOINT}}'
+      AIRFLOW_ENDPOINT: '{{.AIRFLOW_ENDPOINT}}'
+    vars:
+      MYSQL_ENDPOINT: 
+        sh: |
+          echo mysql.$OPENMETADATA_NS.svc.cluster.local
+      AIRFLOW_ENDPOINT: 
+        sh: |
+          echo http://openmetadata-dependencies-web.$OPENMETADATA_NS.svc:8080
+    status:
+      - task is-ci
+
+  prepare-open-metadata-for-fybrik:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/prepare-openmetadata.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${OPENMETADATA_NS},${OPENMETADATA_ENDPOINT},${OPENMETADATA_USER},${OPENMETADATA_PASSWORD}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $OPENMETADATA_NS
+      - kubectl wait --for=condition=complete job/prepare-openmetadata -n $OPENMETADATA_NS
+    env:
+      PATH_TO_MANIFEST: prepare-openmetadata.yaml
+
+  test-fybrik:
+    cmds:
+      - defer: task clean-up-test
+      - task create-image-pull-secret
+      - task deploy-aws-credentials-config-map
+      - task populate-s3
+      - task register-dataset-in-catalog
+      - task define-data-access-policies
+      - task deploy-fybrik-application
+    env:
+      ACCESS_KEY_ID: '{{.ACCESS_KEY_ID}}'
+      SECRET_ACCESS_KEY: '{{.SECRET_ACCESS_KEY}}'
+      SESSION_TOKEN: '{{.SESSION_TOKEN}}'
+      BUCKET: '{{.BUCKET}}'
+      OBJECT_KEY: sample-data.csv
+      TEST_APP_NAME: test-job
+      TEST_AWS_CREDENTIALS_NAME: test-fybrik-aws-credentials 
+      LOCAL_AWS_ENDPOINT: '{{.LOCAL_AWS_ENDPOINT}}'
+    vars:
+      LOCAL_AWS_ENDPOINT:
+        sh: |
+          echo "http://localstack.$FYBRIK_NS.svc.cluster.local:4566"
+      BUCKET:
+        sh: |
+          echo $ENVIRONMENT-test-fybrik-deployment-bucket-$(openssl rand -hex 5)
+      SECRET_ACCESS_KEY: 
+        sh: |
+          if task is-ci
+          then
+            echo $AWS_SECRET_ACCESS_KEY
+          else
+            echo test
+          fi
+      ACCESS_KEY_ID: 
+        sh: |
+          if task is-ci
+          then
+            echo $AWS_ACCESS_KEY_ID
+          else
+            echo test
+          fi
+      SESSION_TOKEN: 
+        sh: |
+          if task is-ci
+          then
+            echo $AWS_SESSION_TOKEN
+          else
+            echo test
+          fi
+
+  deploy-aws-credentials-config-map:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/test-fybrik-aws-credentials.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${ACCESS_KEY_ID},${SECRET_ACCESS_KEY},${SESSION_TOKEN},${AWS_REGION},${TEST_AWS_CREDENTIALS_NAME}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_MANIFEST: test/manifests/test-fybrik-aws-credentials.yaml
+
+  create-image-pull-secret:
+    cmds:
+      - |
+        kubectl create secret docker-registry $SECRET_NAME \
+            --docker-server=ghcr.io \
+            --docker-username=omar-carey-tw \
+            --docker-password=$GHCR_ACCESS_TOKEN  \
+            --docker-email=omar.carey@thoughtworks.com \
+            -n $FYBRIK_WORKLOAD_NS || true
+      - |
+        kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "'${SECRET_NAME}'"}]}' \
+            -n $FYBRIK_WORKLOAD_NS || true
+    env:
+      SECRET_NAME: ghcr-registry-key
+
+  populate-s3:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/populate-s3-job.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${LOCAL_AWS_ENDPOINT},${BUCKET},${OBJECT_KEY},${DOCKER_TEST_IMAGE},${ENVIRONMENT},${TEST_AWS_CREDENTIALS_NAME}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - kubectl wait --for=condition=complete --timeout=120s job/populate-s3 -n $FYBRIK_WORKLOAD_NS
+      - |
+        kubectl patch job populate-s3 -p '{"metadata": {"labels": {"complete": "true"}}}' -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_MANIFEST: test/manifests/populate-s3-job.yaml
+
+  register-dataset-in-catalog:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/secret.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_SECRET_MANIFEST \
+          TEMPLATE_VARS='${ACCESS_KEY_ID},${SECRET_ACCESS_KEY},${TEST_APP_NAME}'
+      - kubectl apply -f $PATH_TO_SECRET_MANIFEST -n $FYBRIK_WORKLOAD_NS || true
+      - |
+        task render-template TEMPLATE_FILE=templates/register-dataset-job.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_REGISTER_JOB_MANIFEST \
+          TEMPLATE_VARS='${AWS_REGION},${S3_ENDPOINT},${BUCKET},${OBJECT_KEY},${FYBRIK_WORKLOAD_NS},${TEST_APP_NAME},${FYBRIK_NS},${DOCKER_TEST_IMAGE}'
+      - kubectl apply -f $PATH_TO_REGISTER_JOB_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - kubectl wait --for=condition=complete job/register-dataset -n $FYBRIK_WORKLOAD_NS
+      - |
+        kubectl patch job register-dataset -p '{"metadata": {"labels": {"complete": "true"}}}' -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_REGISTER_JOB_MANIFEST: test/manifests/register-dataset-job.yaml
+      PATH_TO_SECRET_MANIFEST: test/manifests/secret.yaml
+      S3_ENDPOINT: '{{.S3_ENDPOINT}}'
+    vars:
+      S3_ENDPOINT:
+        sh: |
+          if task is-ci
+          then
+            echo https://s3.$AWS_REGION.amazonaws.com
+          else
+            echo $LOCAL_AWS_ENDPOINT
+          fi
+
+  define-data-access-policies:
+    cmds:
+      - kubectl create configmap test-policy --from-file=test/policies/test-policy.rego -n $FYBRIK_NS || true
+      - kubectl label configmap test-policy openpolicyagent.org/policy=rego -n $FYBRIK_NS || true
+      - while [[ $(kubectl get cm test-policy -n $FYBRIK_NS -o 'jsonpath={.metadata.annotations.openpolicyagent\.org/policy-status}') != '{"status":"ok"}' ]]; do echo "waiting for policy to be applied" && sleep 5; done
+
+  deploy-fybrik-application:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/fybrikapplication.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${TEST_APP_NAME},${CATALOGED_ASSET}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - while [[ $(kubectl get fybrikapplication $TEST_APP_NAME -o 'jsonpath={.status.ready}' -n $FYBRIK_WORKLOAD_NS) != "true" ]]; do echo "waiting for FybrikApplication" && sleep 5; done
+      - while [[ $(kubectl get fybrikapplication $TEST_APP_NAME -o "jsonpath={.status.assetStates.${CATALOGED_ASSET_MODIFIED}.conditions[?(@.type == 'Ready')].status}" -n $FYBRIK_WORKLOAD_NS) != "True" ]]; do echo "waiting for ${CATALOGED_ASSET} asset" && sleep 5; done
+      - task deploy-test-job
+    env:
+      CATALOGED_ASSET: '{{.CATALOGED_ASSET}}'
+      CATALOGED_ASSET_MODIFIED: '{{.CATALOGED_ASSET_MODIFIED}}'
+      PATH_TO_MANIFEST: test/manifests/fybrikapplication.yaml
+    vars:
+      CATALOGED_ASSET: 
+        sh: |
+          kubectl logs -l job-name=register-dataset -n $FYBRIK_WORKLOAD_NS | grep openmetadata | jq '.assetID'
+      CATALOGED_ASSET_MODIFIED:
+        sh: |
+          echo {{.CATALOGED_ASSET}} | sed 's/\./\\\./g'
+
+  deploy-test-job:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/test-fybrik-job.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_JOB_MANIFEST \
+          TEMPLATE_VARS='${ENDPOINT_URL},${CATALOGED_ASSET},${TEST_APP_NAME},${DOCKER_TEST_IMAGE}'
+      - kubectl apply -f $PATH_TO_JOB_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - kubectl wait --for=condition=complete --timeout=10m job/$TEST_APP_NAME -n $FYBRIK_WORKLOAD_NS
+      - |
+        kubectl patch job $TEST_APP_NAME -p '{"metadata": {"labels": {"complete": "true"}}}' -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_JOB_MANIFEST: test/manifests/test-fybrik-job.yaml
+      ENDPOINT_URL: '{{.ENDPOINT_URL}}'
+    vars:
+      ENDPOINT_SCHEME:
+        sh: |
+          kubectl get fybrikapplication $TEST_APP_NAME -o "jsonpath={.status.assetStates.${CATALOGED_ASSET_MODIFIED}.endpoint.fybrik-arrow-flight.scheme}" -n $FYBRIK_WORKLOAD_NS
+      ENDPOINT_HOSTNAME:
+        sh: |
+          kubectl get fybrikapplication $TEST_APP_NAME -o "jsonpath={.status.assetStates.${CATALOGED_ASSET_MODIFIED}.endpoint.fybrik-arrow-flight.hostname}" -n $FYBRIK_WORKLOAD_NS
+      ENDPOINT_PORT:
+        sh: |
+          kubectl get fybrikapplication $TEST_APP_NAME -o "jsonpath={.status.assetStates.${CATALOGED_ASSET_MODIFIED}.endpoint.fybrik-arrow-flight.port}" -n $FYBRIK_WORKLOAD_NS
+      ENDPOINT_URL:
+        sh: |
+          echo {{.ENDPOINT_SCHEME}}://{{.ENDPOINT_HOSTNAME}}:{{.ENDPOINT_PORT}}
+
+  clean-up-test:
+    cmds:
+      - task delete-open-md-asset
+      - task delete-s3-bucket
+      - kubectl delete job -l complete=true -n $FYBRIK_WORKLOAD_NS || true
+      - kubectl delete fybrikapplication/$TEST_APP_NAME -n $FYBRIK_WORKLOAD_NS || true
+      - kubectl delete secret $TEST_APP_NAME -n $FYBRIK_WORKLOAD_NS || true
+      - kubectl delete cm $TEST_AWS_CREDENTIALS_NAME -n $FYBRIK_WORKLOAD_NS || true
+      - kubectl delete cm test-policy -n $FYBRIK_NS || true
+
+  delete-s3-bucket:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/delete-s3-job.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${LOCAL_AWS_ENDPOINT},${BUCKET},${OBJECT_KEY},${DOCKER_TEST_IMAGE},${ENVIRONMENT},${TEST_AWS_CREDENTIALS_NAME}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - kubectl wait --for=condition=complete --timeout=120s job/delete-s3 -n $FYBRIK_WORKLOAD_NS
+      - |
+        kubectl patch job delete-s3 -p '{"metadata": {"labels": {"complete": "true"}}}' -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_MANIFEST: test/manifests/delete-s3-job.yaml
+
+  delete-open-md-asset:
+    cmds:
+      - |
+        task render-template TEMPLATE_FILE=templates/delete-open-md-assets-job.yaml.TEMPLATE \
+          OUTPUT_PATH=$PATH_TO_MANIFEST \
+          TEMPLATE_VARS='${CATALOGED_ASSET},${DOCKER_TEST_IMAGE},${OPENMETADATA_ENDPOINT}'
+      - kubectl apply -f $PATH_TO_MANIFEST -n $FYBRIK_WORKLOAD_NS
+      - kubectl wait --for=condition=complete --timeout=120s job/delete-open-md-asset -n $FYBRIK_WORKLOAD_NS
+      - |
+        kubectl patch job delete-open-md-asset -p '{"metadata": {"labels": {"complete": "true"}}}' -n $FYBRIK_WORKLOAD_NS
+    env:
+      PATH_TO_MANIFEST: test/manifests/delete-open-md-assets-job.yaml
+      CATALOGED_ASSET: '{{.CATALOGED_ASSET}}'
+    vars:
+      CATALOGED_ASSET: 
+        sh: |
+          kubectl logs -l job-name=register-dataset -n $FYBRIK_WORKLOAD_NS | grep openmetadata | jq '.assetID'
+
+  start-minikube:
+    internal: true
+    cmds:
+      - echo Starting minikube...
+      - |
+        minikube start --cpus=4 --memory=8192 --cni=bridge --driver=docker
+    status:
+      - |
+        if task is-ci
+        then
+          exit 0
+        else
+          minikube status
+        fi
+
+  pull-docker-deployment-image:
+    cmds:
+      - |
+        if [ -z "$GHCR_ACCESS_TOKEN" ]
+        then
+          echo Please set GHCR_ACCESS_TOKEN env var to create image pull secret for cluster...
+          exit 1
+        fi
+      - docker pull $DOCKER_DEPLOYMENT_IMAGE
+
+  run-docker-container:
+    cmds:
+      - |
+        docker run --rm --env-file <(env | grep CI) \
+          --env ENVIRONMENT=$ENVIRONMENT \
+          --env DOCKER_TEST_IMAGE=$DOCKER_TEST_IMAGE \
+          --env GHCR_ACCESS_TOKEN=$GHCR_ACCESS_TOKEN \
+          --env AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+          --env AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+          --env AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
+          --network host \
+          -v "$(pwd):/project" \
+          -v "$HOME/.kube/:/root/.kube" \
+          -v "$HOME/.minikube:$HOME/.minikube" \
+          --workdir /project \
+          $DOCKER_DEPLOYMENT_IMAGE sh -c "{{ .COMMAND }}"
+
+  render-template:
+    cmds:
+      - envsubst '{{.TEMPLATE_VARS}}' <  {{.TEMPLATE_FILE}} > {{.OUTPUT_PATH}}
+
+  is-ci:
+    cmds:
+      - printenv CI > /dev/null
